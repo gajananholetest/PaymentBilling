@@ -1,0 +1,123 @@
+#!/bin/bash
+#
+# An example hook script to create integrity Git type Change Package
+# Called by "git receive-pack" with arguments: refname sha1-old sha1-new
+#
+# To enable this hook, rename this file to "update".
+#
+
+# --- Command line
+refname="$1"
+oldrev="$2"
+newrev="$3"
+
+#String pattern holding Integrity Item ID in commit message.
+integrity_item_id="Integrity Item ID: "
+
+#Only create Change Packages on specific acceptable branches return otherwise.
+acceptable_branches="$(git config --get ptc.acceptablebranches)"
+should_continue=$(echo "$acceptable_branches" | grep -w "$refname")
+if [ -z "$should_continue" ]; then
+  exit 0
+fi
+
+output_file="$(mktemp)"
+url_pattern="$(git config --get ptc.urlpattern)"
+url_search="<SHAID>"
+is_bare_repo="$(git rev-parse --is-bare-repository)"
+if [ "$is_bare_repo" = "true" ]; then
+    repo="$(basename $PWD)"
+else
+    repolocation="$(dirname $PWD)"
+    repo="$(basename $repolocation)"
+fi
+
+#get commit id list for the current push
+zero="0000000000000000000000000000000000000000"
+if [ "$oldrev" = "$zero" ]; then
+#Incase of newly created branches
+    hashIDS=$(git rev-list --reverse "$newrev" --not --branches=*)
+else
+    hashIDS=$(git rev-list --reverse --branches="$refname" "$oldrev..$newrev")
+fi
+
+hashIDarray=($hashIDS)
+no_of_commits=${#hashIDarray[@]}
+commit=0
+output_file="$(mktemp)"
+
+while [ "$commit" -lt "$no_of_commits" ];
+do
+    
+    hashID=${hashIDarray[$commit]}
+    #retrieve Item id from commit message
+    IssueID=$(git show -s --format='%B' "$hashID" | grep "$integrity_item_id" |cut -d':' -f2)
+    
+    if [ "$IssueID" -eq "$IssueID" ] 2>/dev/null; then
+    	IssueID=$((IssueID))
+    else
+        echo "ERROR: The commit message is not in the specified standard format " 1>&2
+        rm -f "$output_file"
+        exit 1
+    fi
+    
+    #Item ID not found in commit messsage. Report error and exit.
+    if [ "$IssueID" -lt 1 ]; then
+        echo "ERROR: Integrity Item ID not found in commit message" 1>&2
+        rm -f "$output_file"
+        exit 1
+    fi
+    gitURL="${url_pattern//$url_search/$hashID}"
+
+    memberList=$(git show --pretty="format:" --name-only "$hashID")
+    memberStatusList=$(git show --pretty="format:" --name-status "$hashID"| cut -c1)
+        
+    author=$(git show -s --format='%ae' "$hashID"| cut -d@ -f1)
+    date=$(git show -s --format='%ai' "$hashID")
+    committer=$(git show -s --format='%ce' "$hashID"| cut -d@ -f1)
+    cdate=$(git show -s --format='%ci' "$hashID")
+    summary=$(git show -s --pretty="oneline" "$hashID" |cut -d' ' -f2,3-)
+    commitFileListArray=($memberList)
+    commitStatusListArray=($memberStatusList)
+    no_of_members=${#commitFileListArray[@]}
+
+    #Output change package info into file.
+    echo "$IssueID" >> "$output_file"
+    echo "$hashID" >> "$output_file"
+    echo "$refname" >> "$output_file"
+    echo "$author" >> "$output_file"
+    echo "$date" >> "$output_file"
+    echo "$committer" >> "$output_file"
+    echo "$cdate" >> "$output_file"
+    echo "$summary" >> "$output_file"
+    echo "$gitURL" >> "$output_file"
+    echo "$HOSTNAME" >> "$output_file"
+    echo "$repo" >> "$output_file"
+    echo "$no_of_members" >> "$output_file"
+    member=0
+    while [ "$member" -lt "$no_of_members" ];
+    do
+        memberName=${commitFileListArray[$member]}
+        memberStatus=${commitStatusListArray[$member]}
+        if [ "$memberStatus" == "D" ]; then
+            memberHash="00000"
+        else
+            memberHash=$(git ls-tree "$hashID" "$memberName" | cut -d' ' -f3| cut -f1 )
+        fi
+        
+        echo "$memberName" >> "$output_file"
+        echo "$memberHash" >> "$output_file"
+        echo "$memberStatus" >> "$output_file"
+    	let member=$member+1
+    done
+    let commit=$commit+1
+done
+
+#Call to Integrity application to create and populate Change Package attributes/entries.
+"$GIT_IM_INSTALL_DIR"/bin/CreateCP "$output_file"
+if [ $? -ne 0 ]; then
+    rm  "$output_file"
+	exit 1 
+fi
+rm  "$output_file"
+exit 0 

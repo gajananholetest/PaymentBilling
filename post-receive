@@ -1,0 +1,63 @@
+#!/bin/bash
+#
+# An example hook script for the "post-receive" event.
+#
+# The "post-receive" script is run after receive-pack has accepted a pack
+# and the repository has been updated.  It is passed arguments in through
+# stdin in the form
+#  <oldrev> <newrev> <refname>
+# For example:
+#  aa453216d1b3e49e7f6f98441fa56946ddcd6a20 68f7abf4e6f922807889f52bc043ecd31b79f814 refs/heads/master
+#
+# see contrib/hooks/ for a sample, or uncomment the next line and
+# rename the file to "post-receive".
+
+acceptable_branches="$(git config --get ptc.acceptablebranches)"
+output_file="$(mktemp)"
+integrity_item_id="Integrity Item ID: "
+
+while read oldrev newrev refname
+do
+
+#Only close Change Packages on specific acceptable branches.
+should_continue=$(echo "$acceptable_branches" | grep -w "$refname")
+if [ -z "$should_continue" ]; then
+  continue
+fi
+
+zero="0000000000000000000000000000000000000000"
+
+if [ "$oldrev" = "$zero" ]; then
+    branches=$(git for-each-ref --format='%(refname)' refs/heads/ |grep -F -v "$refname")
+    hashIDS=$(git rev-parse --not $branches | git rev-list --stdin "$newrev")
+else
+    hashIDS=$(git rev-list --reverse --branches="$refname" "$oldrev..$newrev")
+fi
+    hashIDarray=($hashIDS)
+    no_of_commits=${#hashIDarray[@]}
+    commit=0
+    while [ "$commit" -lt "$no_of_commits" ];
+    do
+        hashID=${hashIDarray[$commit]}
+        IssueID=$(git show -s --format='%B' "$hashID" | grep "$integrity_item_id" |cut -d':' -f2)
+        IssueID=$((IssueID))
+        if [ "$IssueID" -lt 1 ]; then
+            echo "ERROR: Integrity Item ID not found in commit message" 1>&2
+            let commit=$commit+1
+            continue
+        fi
+        #Output change package info into file.
+        echo "$IssueID" >> "$output_file"
+        echo "$hashID" >> "$output_file"
+        let commit=$commit+1
+    done
+done
+
+#If no acceptable branch found then exit
+if [ -z "$zero" ]; then 
+    exit 0
+fi
+
+#Call to Integrity application to Close Change Package.
+"$GIT_IM_INSTALL_DIR/bin/CloseCP" "$output_file"
+rm  "$output_file"
